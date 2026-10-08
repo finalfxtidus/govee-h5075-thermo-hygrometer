@@ -6,6 +6,14 @@ Also supports **H5074**, **H5179**, and **H5104** (advertisement scan/measure pl
 
 H5104 units may use MAC prefixes other than the older Govee `A4:C1:38` OUI (for example `CF:35:33:...`). Scan matching therefore also accepts devices whose advertised name contains `H5104`.
 
+### Connecting with `-a` / `-i` on Linux (BlueZ)
+
+Advertisement scan (`-s` / `-m`) and GATT connect (`-a ... -i`) cannot share the adapter cleanly. If you see blank errors, `failed to discover services`, or `Operation already in progress`:
+
+1. Stop any continuous measure session (`-m`) with Ctrl+C.
+2. Reset the adapter: `bluetoothctl power off && bluetoothctl power on`
+3. Retry: `./govee-h5075.py -a CF:35:33:35:68:1F -i`
+
 ## Preconditions
 Install the python module [bleak](https://bleak.readthedocs.io/en/latest/)
 
