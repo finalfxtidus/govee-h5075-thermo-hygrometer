@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Modified to add support for Govee H5179 and H5074 thermometers
+# Modified to add support for Govee H5179, H5074, and H5104 thermometers
 import argparse
 import asyncio
 import json
@@ -250,7 +250,7 @@ class DataControl():
 
         if device_type == "H5179":
             device_category = "H5179"
-        elif device_type in ["H5075", "H5074"]:
+        elif device_type in ["H5075", "H5074", "H5104"]:
             device_category = "H507*"
         else:
             device_category = "H507*"
@@ -304,6 +304,8 @@ class MacAndSerial():
 class GoveeThermometerHygrometer(BleakClient):
 
     MAC_PREFIX = ["A4:C1:38:", "1C:9F:24:"]
+    # Models identifiable by advertisement local name (may use other MAC OUIs)
+    SUPPORTED_NAME_MARKERS = ("H5075", "H5074", "H5179", "H5104")
 
     UUID_NAME = "00002a00-0000-1000-8000-00805f9b34fb"
     UUID_DEVICE = "494e5445-4c4c-495f-524f-434b535f2011"
@@ -352,6 +354,18 @@ class GoveeThermometerHygrometer(BleakClient):
         self.measurement: Measurement = None
 
         self._data_control: DataControl = None
+
+    @staticmethod
+    def is_mac_address(label: str) -> bool:
+        return bool(re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", label or ""))
+
+    @staticmethod
+    def is_supported_scan_target(address: str, name: str) -> bool:
+        if not name:
+            return False
+        if address.upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
+            return True
+        return any(marker in name for marker in GoveeThermometerHygrometer.SUPPORTED_NAME_MARKERS)
 
     async def connect(self) -> None:
 
@@ -641,7 +655,7 @@ class GoveeThermometerHygrometer(BleakClient):
         LOGGER.info(f"{self.address}: received device name: {name}")
 
         self.deviceName = name or self.deviceName
-        if "H5075" in self.deviceName:
+        if "H5075" in self.deviceName or "H5104" in self.deviceName:
             self.manufacturer = name[0:2]
             self.model = name[2:7]
         elif "H5074" in self.deviceName or "H5179" in self.deviceName:
@@ -814,22 +828,23 @@ class GoveeThermometerHygrometer(BleakClient):
             if unique is False or device.address not in found_devices:
                 # Only record as found if advertisement has measurement data
                 if 0xec88 in advertising_data.manufacturer_data \
-                        or 0x8801 in advertising_data.manufacturer_data:
+                        or 0x8801 in advertising_data.manufacturer_data \
+                        or 0x0001 in advertising_data.manufacturer_data:
                     found_devices.append(device.address)
                     LOGGER.debug(f"Found {device.address} ({device.name})")
-                if device.name and device.address.upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
+                if GoveeThermometerHygrometer.is_supported_scan_target(device.address, device.name):
                     # print (advertising_data)
+                    if device.address in alias.aliases:
+                        humidityOffset = alias.aliases[device.address][1] if alias.aliases[device.address][1] else 0.0
+                        temperatureOffset = alias.aliases[device.address][
+                            2] if alias.aliases[device.address][2] else 0.0
+                    else:
+                        humidityOffset = 0.0
+                        temperatureOffset = 0.0
+
                     if 0xec88 in advertising_data.manufacturer_data:
                         LOGGER.debug(
                             f"{device.address} ({device.name}): Received advertisement data({MyLogger.hexstr(advertising_data.manufacturer_data[0xec88])})")
-
-                        if device.address in alias.aliases:
-                            humidityOffset = alias.aliases[device.address][1] if alias.aliases[device.address][1] else 0.0
-                            temperatureOffset = alias.aliases[device.address][
-                                2] if alias.aliases[device.address][2] else 0.0
-                        else:
-                            humidityOffset = 0.0
-                            temperatureOffset = 0.0
 
                         # H5075 and H5074 have different format
                         if "H5074" in device.name:
@@ -849,6 +864,24 @@ class GoveeThermometerHygrometer(BleakClient):
 
                         consumer(device.address, device.name,
                                  battery, measurement)
+                    elif 0x0001 in advertising_data.manufacturer_data:
+                        # H5104 (and related H510x) — same packed encoding as H5075, offset by one byte
+                        mfg = advertising_data.manufacturer_data[0x0001]
+                        LOGGER.debug(
+                            f"{device.address} ({device.name}): Received advertisement data({MyLogger.hexstr(mfg)})")
+
+                        if len(mfg) >= 6:
+                            measurement = Measurement.from_bytes(
+                                bytes=mfg[2:5], humidityOffset=humidityOffset, temperatureOffset=temperatureOffset)
+                            battery = mfg[5] & 0x7F
+
+                            LOGGER.debug(f"{device.address}: Decoded measurement data("
+                                         f"{MyLogger.hexstr(mfg[2:5])}) is temperature={measurement.temperatureC}°C, humidity={measurement.relHumidity}%")
+                            LOGGER.debug(f"{device.address}: Decoded battery data("
+                                         f"{hex(mfg[5])}) is {battery}%")
+
+                            consumer(device.address, device.name,
+                                     battery, measurement)
                     elif 0x8801 in advertising_data.manufacturer_data:
                         # Govee 5179
                         LOGGER.debug(
@@ -946,7 +979,7 @@ class Alias():
                     for line in ins:
                         _m = re.match(
                             r"([0-9A-Fa-f:]+) +([^ ]+)( (-?\d+\.\d) (-?\d+\.\d))?$", line)
-                        if _m and _m.groups()[0].upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
+                        if _m and GoveeThermometerHygrometer.is_mac_address(_m.groups()[0]):
 
                             alias = _m.groups()[1].strip()
                             humidityOffset = float(_m.groups()[3]) if _m.groups()[
@@ -962,7 +995,7 @@ class Alias():
 
     def resolve(self, label: str) -> str:
 
-        if label.upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
+        if GoveeThermometerHygrometer.is_mac_address(label):
             return label
         else:
             macs = [
@@ -973,7 +1006,7 @@ class Alias():
 def arg_parse(args: 'list[str]') -> dict:
 
     parser = argparse.ArgumentParser(
-        prog='govee-h5075.py', description='Shell script in order to request Govee H5075 temperature humidity sensor')
+        prog='govee-h5075.py', description='Shell script in order to request Govee H5075/H5074/H5179/H5104 temperature humidity sensors')
 
     parser.add_argument('-a', '--address', help='MAC address or alias')
     parser.add_argument(
